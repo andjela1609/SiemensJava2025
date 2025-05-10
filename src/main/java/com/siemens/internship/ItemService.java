@@ -8,14 +8,20 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 @Service
 public class ItemService {
     @Autowired
     private ItemRepository itemRepository;
+
     private static ExecutorService executor = Executors.newFixedThreadPool(10);
-    private List<Item> processedItems = new ArrayList<>();
-    private int processedCount = 0;
+
+    // ArrayList as well as int --> not thread-safe
+    // We should allow safe access from threads
+    private final List<Item> processedItems = new CopyOnWriteArrayList<>();
+    private final AtomicInteger processedCount = new AtomicInteger(0);
 
 
     public List<Item> findAll() {
@@ -53,10 +59,15 @@ public class ItemService {
      * Examine how errors are handled and propagated
      * Consider the interaction between Spring's @Async and CompletableFuture
      */
+
+    // We should handle this method asynchronously so this method should return CompletableFuture<>
+    // CompletableFuture<> waits for background tasks to complete
     @Async
-    public List<Item> processItemsAsync() {
+    public CompletableFuture<List<Item>> processItemsAsync() {
 
         List<Long> itemIds = itemRepository.findAllIds();
+
+        /*
 
         for (Long id : itemIds) {
             CompletableFuture.runAsync(() -> {
@@ -81,7 +92,35 @@ public class ItemService {
         }
 
         return processedItems;
+         */
+
+        // Each item should be added to this list
+        List<CompletableFuture<Void>> futures = itemIds.stream()
+                .map(id -> CompletableFuture.runAsync(() -> {
+                    try {
+                        // Simulate processing delay
+                        Thread.sleep(100);
+
+                        itemRepository.findById(id).ifPresent(item -> {
+                            item.setStatus("PROCESSED");
+                            itemRepository.save(item);
+
+                            processedItems.add(item);
+                            processedCount.incrementAndGet();
+                        });
+                    } catch (Exception e) {
+                        // Handle error more robustly
+                        System.err.println("Error processing item ID " + id + ": " + e.getMessage());
+                        throw new CompletionException(e);
+                    }
+                }))
+                .toList();
+
+        // We should wait for all tasks to be complete and then return the final list
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenApply(v -> processedItems);
+    }
     }
 
-}
+
 
